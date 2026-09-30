@@ -3,6 +3,13 @@
 # Also checks for the inswapper_128.onnx model file.
 # Idempotent - safe to run multiple times.
 
+# install.ps1 runs with $ErrorActionPreference = 'Stop'. On Windows PowerShell,
+# assigning a native command's output to a variable under that preference turns
+# a non-zero exit (an expected "not installed yet" probe) into a terminating
+# error even when stderr is redirected to $null. Every probe/install below is
+# expected to fail on a fresh machine, so this must stay 'Continue' for those.
+$ErrorActionPreference = 'Continue'
+
 Write-Host "  [face-swap] Checking dependencies..." -ForegroundColor Cyan
 
 # Check bun
@@ -25,7 +32,10 @@ if ($insightfaceOk -eq "ok") {
     Write-Host "    OK  insightface already installed" -ForegroundColor Green
 } else {
     Write-Host "    Installing insightface..." -ForegroundColor Yellow
-    pip install insightface
+    python -m pip install insightface
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "    FAILED to install insightface. Resolve the pip error above and rerun deps.ps1." -ForegroundColor Red
+    }
 }
 
 # Check onnxruntime (try GPU first, fall back to CPU)
@@ -34,11 +44,14 @@ if ($onnxOk -eq "ok") {
     Write-Host "    OK  onnxruntime already installed" -ForegroundColor Green
 } else {
     Write-Host "    Installing onnxruntime-gpu (GPU-accelerated)..." -ForegroundColor Yellow
-    pip install onnxruntime-gpu
+    python -m pip install onnxruntime-gpu
     $onnxOk = python -c "import onnxruntime; print('ok')" 2>$null
     if ($onnxOk -ne "ok") {
         Write-Host "    onnxruntime-gpu failed; installing onnxruntime (CPU)..." -ForegroundColor Yellow
-        pip install onnxruntime
+        python -m pip install onnxruntime
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    FAILED to install onnxruntime. Resolve the pip error above and rerun deps.ps1." -ForegroundColor Red
+        }
     }
 }
 
@@ -48,7 +61,10 @@ if ($cvOk -eq "ok") {
     Write-Host "    OK  opencv-python already installed" -ForegroundColor Green
 } else {
     Write-Host "    Installing opencv-python..." -ForegroundColor Yellow
-    pip install opencv-python
+    python -m pip install opencv-python
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "    FAILED to install opencv-python. Resolve the pip error above and rerun deps.ps1." -ForegroundColor Red
+    }
 }
 
 # Check model file
