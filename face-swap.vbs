@@ -1,5 +1,5 @@
 Dim sPath, sDir, oShell, fso
-Dim repoRoot, envFilePath, envStream, envLine, eqPos, envKey, envVal
+Dim envFilePath, envStream, envLine, eqPos, envKey, envVal
 
 ' Accept optional image or folder path
 If WScript.Arguments.Count > 0 Then
@@ -13,12 +13,8 @@ sDir = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\") - 1)
 Set oShell = CreateObject("WScript.Shell")
 Set fso    = CreateObject("Scripting.FileSystemObject")
 
-' Repo root is two levels up from tools\face-swap\
-repoRoot = Left(sDir, InStrRev(sDir, "\") - 1)  ' -> tools\
-repoRoot = Left(repoRoot, InStrRev(repoRoot, "\") - 1)  ' -> repo root
-
 ' Load every key=value from .env into the process environment
-envFilePath = repoRoot & "\.env"
+envFilePath = sDir & "\.env"
 If fso.FileExists(envFilePath) Then
     Set envStream = fso.OpenTextFile(envFilePath, 1)
     Do While Not envStream.AtEndOfStream
@@ -57,6 +53,11 @@ oShell.CurrentDirectory = sDir
 Dim buildDir
 buildDir = sDir & "\build"
 If Not fso.FolderExists(buildDir) Then
-    oShell.Run "cmd /c cd /d """ & sDir & """ && bun run build:dev", 1, True
+    Dim buildExitCode
+    buildExitCode = oShell.Run("cmd /c cd /d """ & sDir & """ && bun run build:dev", 0, True)
+    If buildExitCode <> 0 Then
+        MsgBox "Face Swap could not build. Run bun run build:dev in the clone to see the error.", 16, "Face Swap"
+        WScript.Quit buildExitCode
+    End If
 End If
 oShell.Run "bun run dev", 0, False

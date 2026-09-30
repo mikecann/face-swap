@@ -8,6 +8,7 @@ import type {
 import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
+import { resolveToolDir } from "./tool-dir.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -17,22 +18,9 @@ const folderPath =
   process.env["FOLDER_PATH"] ?? process.env["USERPROFILE"] + "\\Downloads";
 const sessionId = crypto.randomUUID();
 
-// TOOL_DIR is set by face-swap.vbs to the directory containing face-swap.vbs itself.
-// Fall back to walking up from import.meta.url in case of direct dev runs.
-const toolDir =
-  process.env["TOOL_DIR"] ??
-  path.resolve(
-    path.dirname(
-      new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
-    ),
-    "..",
-    "..",
-    "..",
-    "..",
-    "..",
-    "..",
-  );
-// face-swap-runner.bat does: python face-swap.py %* — same pattern as img-upscale.bat in this repo
+// Launchers supply TOOL_DIR; direct development runs locate the standalone clone.
+const toolDir = resolveToolDir(import.meta.url, process.env["TOOL_DIR"]);
+// The batch runner lets cmd.exe resolve Python, including Windows Store aliases.
 const runnerBat = path.join(toolDir, "face-swap-runner.bat");
 
 const localAppData =
@@ -46,7 +34,7 @@ const modelPath = path.join(
 );
 
 // ---------------------------------------------------------------------------
-// Python check - same pattern as img-upscale.bat / backup-phone.ps1 in this repo:
+// Python check:
 // always invoke Python through a .bat file so cmd.exe handles Windows Store
 // app-execution-alias resolution. Never try to spawn python.exe directly.
 // ---------------------------------------------------------------------------
@@ -264,7 +252,7 @@ async function runSwap(params: SwapParams) {
       return;
     }
 
-    // Invoke via the .bat runner — same pattern as img-upscale.bat in this repo
+    // Invoke via the batch runner for Windows Python alias resolution.
     const scriptArgs = [
       "--target",
       targetFile,
