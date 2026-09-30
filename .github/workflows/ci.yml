@@ -41,6 +41,11 @@ jobs:
               }
             }
           if ($failed) { exit 1 }
+      - name: Run deps.ps1 install behaviour tests
+        shell: pwsh
+        run: |
+          . tests/deps.Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check POSIX script syntax
         if: runner.os == 'macOS'
         run: bash -n face-swap install.sh
