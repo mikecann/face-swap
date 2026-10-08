@@ -39,7 +39,8 @@ backend currently requires Windows cmd.exe. Do not claim macOS swapping works.
 
 ## Key files
 
-- `src/bun/index.ts`: window, local HTTP/SSE server and swap jobs.
+- `src/bun/index.ts`: window, result file routes and swap jobs.
+- `src/bun/events.ts`: loopback HTTP server, session token and SSE stream.
 - `src/bun/tool-dir.ts`: clone lookup for source and built entry points.
 - `src/bun/swap-command.ts`: runner command for swap jobs; paths go via env, never cmd.exe args.
 - `src/ui/App.tsx`: target/source selection, logs and result preview.

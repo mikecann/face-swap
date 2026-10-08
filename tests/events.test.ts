@@ -1,0 +1,109 @@
+import { afterEach, describe, expect, it } from "bun:test";
+import { networkInterfaces } from "os";
+import { createEventsServer } from "../src/bun/events.js";
+
+// Read an SSE stream into a growing string so tests can wait for text to arrive.
+function readStream(res: Response) {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  const state = { text: "", closed: false };
+  (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        state.text += decoder.decode(value, { stream: true });
+      }
+    } catch {}
+    state.closed = true;
+  })();
+  return { state, cancel: () => reader.cancel().catch(() => {}) };
+}
+
+async function waitFor(check: () => boolean, ms: number) {
+  const end = Date.now() + ms;
+  while (!check() && Date.now() < end) await Bun.sleep(20);
+  return check();
+}
+
+describe("events server", () => {
+  let events: ReturnType<typeof createEventsServer> | undefined;
+  let cancel: (() => void) | undefined;
+
+  afterEach(() => {
+    cancel?.();
+    events?.server.stop(true);
+  });
+
+  it("serves other paths through the fallback", async () => {
+    events = createEventsServer(() => new Response("fallback"));
+    const res = await fetch(events.urlFor("/images/x.png"));
+    expect(await res.text()).toBe("fallback");
+  });
+
+  // Without a hostname Bun.serve listens on every interface, so anyone on the
+  // same network could read the session's swap results and event stream.
+  it("listens on loopback only", async () => {
+    events = createEventsServer(() => new Response("fallback"));
+    expect(events.server.hostname).toBe("127.0.0.1");
+    const lan = Object.values(networkInterfaces())
+      .flat()
+      .find((i) => i?.family === "IPv4" && !i.internal)?.address;
+    if (lan) {
+      const reached = await fetch(`http://${lan}:${events.server.port}/images/x.png`).then(() => true, () => false);
+      expect(reached).toBe(false);
+    }
+  });
+
+  it("rejects requests without this session's token", async () => {
+    let fallbackCalls = 0;
+    events = createEventsServer(() => {
+      fallbackCalls++;
+      return new Response("fallback");
+    });
+    const base = `http://127.0.0.1:${events.server.port}`;
+    for (const path of ["/events", "/events?token=wrong", "/images/x.png", "/images/x.png?token="]) {
+      const res = await fetch(base + path, { headers: { "Last-Event-ID": "1" } });
+      expect(res.status).toBe(403);
+      await res.body?.cancel();
+    }
+    expect(fallbackCalls).toBe(0);
+  });
+
+  // Bun.serve closes connections idle for 10 seconds by default, checking every
+  // few seconds, so stay idle for 15. A result sent while the UI reconnected
+  // used to be lost.
+  it("keeps /events open past Bun's idle timeout and still delivers events", async () => {
+    events = createEventsServer(() => new Response("Not found", { status: 404 }));
+    const res = await fetch(events.urlFor("/events"));
+    expect(res.headers.get("Content-Type")).toBe("text/event-stream");
+    const stream = readStream(res);
+    cancel = stream.cancel;
+
+    await Bun.sleep(15_000);
+    events.broadcast({ kind: "swapResult", jobId: "job-1" });
+
+    const arrived = await waitFor(() => stream.state.text.includes('"jobId":"job-1"'), 2_000);
+    expect(stream.state.closed).toBe(false);
+    expect(arrived).toBe(true);
+  }, 25_000);
+
+  // EventSource sends Last-Event-ID when it reconnects, so replay what it missed.
+  it("replays events sent while the client was reconnecting", async () => {
+    events = createEventsServer(() => new Response("Not found", { status: 404 }));
+    const url = events.urlFor("/events");
+    const first = readStream(await fetch(url));
+    events.broadcast({ kind: "swapping", jobId: "job-1" });
+    expect(await waitFor(() => first.state.text.includes("job-1"), 2_000)).toBe(true);
+    const lastId = first.state.text.match(/^id: (\d+)$/m)?.[1];
+    expect(lastId).toBeDefined();
+    first.cancel();
+
+    events.broadcast({ kind: "swapResult", jobId: "job-2" });
+
+    const second = readStream(await fetch(url, { headers: { "Last-Event-ID": lastId! } }));
+    cancel = second.cancel;
+    expect(await waitFor(() => second.state.text.includes("job-2"), 2_000)).toBe(true);
+    expect(second.state.text).not.toContain("job-1");
+  });
+});
