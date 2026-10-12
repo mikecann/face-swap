@@ -39,8 +39,11 @@ backend currently requires Windows cmd.exe. Do not claim macOS swapping works.
 
 ## Key files
 
-- `src/bun/index.ts`: window, local HTTP/SSE server and swap jobs.
+- `src/bun/index.ts`: window, result file routes and swap jobs.
+- `src/bun/events.ts`: loopback HTTP server, session token and SSE stream.
 - `src/bun/tool-dir.ts`: clone lookup for source and built entry points.
+- `src/bun/swap-command.ts`: runner command for swap jobs; the runner runs by name from
+  the clone and paths go via env, so neither ever reaches cmd.exe's command line.
 - `src/ui/App.tsx`: target/source selection, logs and result preview.
 - `face-swap.py`: face detection, swaps and video processing.
 - `face-swap-runner.bat`: Windows Python alias resolution through cmd.exe.

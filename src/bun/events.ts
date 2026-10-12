@@ -1,0 +1,93 @@
+import { randomUUID, timingSafeEqual } from "crypto";
+
+// ---------------------------------------------------------------------------
+// HTTP server with an SSE stream at /events - bun -> webview
+// ---------------------------------------------------------------------------
+
+// Listens on loopback only, and every request must carry this session's token.
+// Other local processes and browser pages can still reach 127.0.0.1, and
+// /events replays recent results to whoever sends a Last-Event-ID.
+export function createEventsServer<E>(fallbackFetch: (req: Request) => Response | Promise<Response>) {
+  const encoder = new TextEncoder();
+  const token = randomUUID();
+  const tokenBytes = Buffer.from(token);
+  const clients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  // Recent events, replayed to a client that reconnects with Last-Event-ID.
+  const recent: { id: number; bytes: Uint8Array }[] = [];
+  let nextId = 1;
+
+  function hasToken(url: URL) {
+    const given = Buffer.from(url.searchParams.get("token") ?? "");
+    return given.length === tokenBytes.length && timingSafeEqual(given, tokenBytes);
+  }
+
+  function broadcast(event: E) {
+    const id = nextId++;
+    const bytes = encoder.encode(`id: ${id}\ndata: ${JSON.stringify(event)}\n\n`);
+    recent.push({ id, bytes });
+    if (recent.length > 100) recent.shift();
+    for (const ctrl of clients) {
+      try {
+        ctrl.enqueue(bytes);
+      } catch {
+        clients.delete(ctrl);
+      }
+    }
+  }
+
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    // Bun closes connections idle for 10s by default, which drops the SSE
+    // stream and loses any event sent while the UI reconnects.
+    idleTimeout: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (!hasToken(url)) return new Response("Forbidden", { status: 403 });
+      if (url.pathname !== "/events") return fallbackFetch(req);
+
+      const lastEventId = req.headers.get("Last-Event-ID");
+      let ctrl: ReadableStreamDefaultController<Uint8Array>;
+      let ping: Timer | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          ctrl = c;
+          clients.add(ctrl);
+          // Flush headers now so the client sees the stream open straight away.
+          // The id gives a new client a cursor before any real event, so even a
+          // reconnect after an early drop sends Last-Event-ID and gets a replay.
+          ctrl.enqueue(encoder.encode(`: connected\nid: ${nextId - 1}\n\n`));
+          if (lastEventId !== null) {
+            const lastId = Number(lastEventId);
+            for (const e of recent) if (e.id > lastId) ctrl.enqueue(e.bytes);
+          }
+          ping = setInterval(() => {
+            try { ctrl.enqueue(encoder.encode(": ping\n\n")); }
+            catch { clearInterval(ping); }
+          }, 5_000);
+        },
+        cancel() {
+          clients.delete(ctrl);
+          clearInterval(ping);
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    },
+  });
+
+  // URLs handed to the webview. EventSource and <img> can't send headers, so
+  // the token goes in the query string.
+  function urlFor(path: string) {
+    const url = new URL(path, `http://127.0.0.1:${server.port}`);
+    url.searchParams.set("token", token);
+    return url.href;
+  }
+
+  return { server, broadcast, urlFor };
+}

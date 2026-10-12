@@ -9,6 +9,8 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { resolveToolDir } from "./tool-dir.js";
+import { runnerCommand, swapCommand } from "./swap-command.js";
+import { createEventsServer } from "./events.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -41,7 +43,9 @@ const modelPath = path.join(
 
 async function checkPython(): Promise<boolean> {
   try {
-    const p = Bun.spawn(["cmd", "/c", runnerBat, "--help"], {
+    const { cmd, cwd } = runnerCommand(runnerBat, ["--help"]);
+    const p = Bun.spawn(cmd, {
+      cwd,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -121,79 +125,30 @@ function createAutoSavedPath(targetOriginalPath?: string, isVideo: boolean = fal
 }
 
 // ---------------------------------------------------------------------------
-// SSE - bun -> webview
-// ---------------------------------------------------------------------------
-
-const sseClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
-
-function broadcastSse(event: SseEvent) {
-  const bytes = new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
-  for (const ctrl of sseClients) {
-    try {
-      ctrl.enqueue(bytes);
-    } catch {
-      sseClients.delete(ctrl);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // HTTP server - images + SSE
 // ---------------------------------------------------------------------------
 
-const server = Bun.serve({
-  port: 0,
-  fetch(req) {
-    const url = new URL(req.url);
-
-    if (url.pathname === "/events") {
-      let ctrl: ReadableStreamDefaultController<Uint8Array>;
-      const stream = new ReadableStream<Uint8Array>({
-        start(c) {
-          ctrl = c;
-          sseClients.add(ctrl);
-          const ping = setInterval(() => {
-            try {
-              ctrl.enqueue(new TextEncoder().encode(": ping\n\n"));
-            } catch {
-              clearInterval(ping);
-            }
-          }, 15_000);
-        },
-        cancel() {
-          sseClients.delete(ctrl);
-        },
-      });
-      return new Response(stream, {
+const { server, broadcast: broadcastSse, urlFor } = createEventsServer<SseEvent>((req) => {
+  const url = new URL(req.url);
+  const match = url.pathname.match(/^\/images\/([^/]+\.(png|mp4))$/);
+  if (match) {
+    const filePath = path.join(tempDir, match[1]);
+    if (fs.existsSync(filePath)) {
+      const isVideo = match[2] === "mp4";
+      return new Response(Bun.file(filePath), {
         headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
+          "Content-Type": isVideo ? "video/mp4" : "image/png",
           "Access-Control-Allow-Origin": "*",
         },
       });
     }
+  }
 
-    const match = url.pathname.match(/^\/images\/([^/]+\.(png|mp4))$/);
-    if (match) {
-      const filePath = path.join(tempDir, match[1]);
-      if (fs.existsSync(filePath)) {
-        const isVideo = match[2] === "mp4";
-        return new Response(Bun.file(filePath), {
-          headers: {
-            "Content-Type": isVideo ? "video/mp4" : "image/png",
-            "Access-Control-Allow-Origin": "*",
-          },
-        });
-      }
-    }
-
-    return new Response("Not found", { status: 404 });
-  },
+  return new Response("Not found", { status: 404 });
 });
 
-const baseUrl = `http://127.0.0.1:${server.port}`;
 log(
-  `face-swap server at ${baseUrl} | model=${fs.existsSync(modelPath) ? "found" : "MISSING"}`,
+  `face-swap server at http://127.0.0.1:${server.port} | model=${fs.existsSync(modelPath) ? "found" : "MISSING"}`,
 );
 
 // ---------------------------------------------------------------------------
@@ -252,21 +207,22 @@ async function runSwap(params: SwapParams) {
       return;
     }
 
-    // Invoke via the batch runner for Windows Python alias resolution.
-    const scriptArgs = [
-      "--target",
-      targetFile,
-      "--source",
-      sourceFile,
-      "--output",
-      outputFile,
-      "--model",
-      modelPath,
-    ];
-    const spawnArgs = ["cmd", "/c", runnerBat, ...scriptArgs];
-    log(`[${jobId}] spawn: ${spawnArgs.join(" ")}`);
+    // Invoke via the batch runner for Windows Python alias resolution. The
+    // paths travel in the environment, never on cmd.exe's command line.
+    const { cmd, cwd, env } = swapCommand(runnerBat, {
+      target: targetFile,
+      source: sourceFile,
+      output: outputFile,
+      model: modelPath,
+    });
+    log(`[${jobId}] spawn: ${cmd.join(" ")} target=${targetFile} source=${sourceFile} output=${outputFile}`);
 
-    const proc = Bun.spawn(spawnArgs, { stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(cmd, {
+      cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, ...env },
+    });
 
     // Stream stdout and stderr to the frontend in real-time
     let fullLog = "";
@@ -324,7 +280,7 @@ async function runSwap(params: SwapParams) {
 
     const image: SwapResult = {
       imageId: outputId,
-      serveUrl: `${baseUrl}/images/${filename}`,
+      serveUrl: urlFor(`/images/${filename}`),
       tempPath: outputFile,
       autoSavedPath,
       isVideo,
@@ -442,7 +398,7 @@ const rpc = BrowserView.defineRPC<FaceSwapRPC>({
       getConfig: async () => ({
         initialTargetDataUrl: loadInitialTargetDataUrl(),
         initialTargetPath: process.env["TARGET_IMAGE"],
-        eventsUrl: `${baseUrl}/events`,
+        eventsUrl: urlFor("/events"),
         modelMissing: !fs.existsSync(modelPath),
         modelPath,
         pythonMissing: !(await pythonOkPromise),

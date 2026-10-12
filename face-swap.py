@@ -8,6 +8,9 @@ Usage:
 --source  Donor face image (face taken from here)
 --output  Where to write the result
 --model   Optional path to inswapper_128.onnx (defaults to %LOCALAPPDATA%/face-swap/models/inswapper_128.onnx)
+
+Each option can also come from FACE_SWAP_TARGET, FACE_SWAP_SOURCE, FACE_SWAP_OUTPUT
+and FACE_SWAP_MODEL. The app uses these, so paths never reach cmd.exe's command line.
 """
 
 import argparse
@@ -153,12 +156,16 @@ def process_video(target_path, source_face, app, swapper, output_path):
 
 
 def main():
+    env = os.environ.get
     parser = argparse.ArgumentParser(description="Swap a face in a target image or video")
-    parser.add_argument("--target", required=True, help="Target image or video (face to replace)")
-    parser.add_argument("--source", required=True, help="Source face image (donor face)")
-    parser.add_argument("--output", required=True, help="Output file path")
-    parser.add_argument("--model", default=None, help="Path to inswapper_128.onnx model")
+    parser.add_argument("--target", default=env("FACE_SWAP_TARGET"), help="Target image or video (face to replace)")
+    parser.add_argument("--source", default=env("FACE_SWAP_SOURCE"), help="Source face image (donor face)")
+    parser.add_argument("--output", default=env("FACE_SWAP_OUTPUT"), help="Output file path")
+    parser.add_argument("--model", default=env("FACE_SWAP_MODEL"), help="Path to inswapper_128.onnx model")
     args = parser.parse_args()
+    missing = [f"--{name}" for name in ("target", "source", "output") if not getattr(args, name)]
+    if missing:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
 
     model_path = args.model or get_default_model_path()
 
