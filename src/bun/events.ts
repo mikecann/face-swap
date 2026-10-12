@@ -46,7 +46,7 @@ export function createEventsServer<E>(fallbackFetch: (req: Request) => Response 
       if (!hasToken(url)) return new Response("Forbidden", { status: 403 });
       if (url.pathname !== "/events") return fallbackFetch(req);
 
-      const lastId = Number(req.headers.get("Last-Event-ID") ?? 0);
+      const lastEventId = req.headers.get("Last-Event-ID");
       let ctrl: ReadableStreamDefaultController<Uint8Array>;
       let ping: Timer | undefined;
       const stream = new ReadableStream<Uint8Array>({
@@ -54,8 +54,13 @@ export function createEventsServer<E>(fallbackFetch: (req: Request) => Response 
           ctrl = c;
           clients.add(ctrl);
           // Flush headers now so the client sees the stream open straight away.
-          ctrl.enqueue(encoder.encode(": connected\n\n"));
-          if (lastId) for (const e of recent) if (e.id > lastId) ctrl.enqueue(e.bytes);
+          // The id gives a new client a cursor before any real event, so even a
+          // reconnect after an early drop sends Last-Event-ID and gets a replay.
+          ctrl.enqueue(encoder.encode(`: connected\nid: ${nextId - 1}\n\n`));
+          if (lastEventId !== null) {
+            const lastId = Number(lastEventId);
+            for (const e of recent) if (e.id > lastId) ctrl.enqueue(e.bytes);
+          }
           ping = setInterval(() => {
             try { ctrl.enqueue(encoder.encode(": ping\n\n")); }
             catch { clearInterval(ping); }

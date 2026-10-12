@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { swapCommand } from "../src/bun/swap-command";
+import { runnerCommand, swapCommand } from "../src/bun/swap-command";
 
 // A file name like "photo&calc&.jpg" is valid on Windows. cmd.exe would run
 // everything after the & if the path were on its command line.
@@ -25,8 +25,9 @@ describe("swap command", () => {
   test("keeps file paths off the cmd.exe command line", () => {
     const { root, paths } = fixture();
     try {
-      const { cmd, env } = swapCommand("C:\\tools\\face-swap-runner.bat", paths);
-      expect(cmd).toEqual(["cmd", "/c", "C:\\tools\\face-swap-runner.bat"]);
+      const { cmd, cwd, env } = swapCommand(`C:\\tools${hostile}\\face-swap-runner.bat`, paths);
+      expect(cmd).toEqual(["cmd", "/c", ".\\face-swap-runner.bat"]);
+      expect(cwd).toBe(`C:\\tools${hostile}`);
       expect(env).toEqual({
         FACE_SWAP_TARGET: paths.target,
         FACE_SWAP_SOURCE: paths.source,
@@ -59,11 +60,25 @@ describe("swap command", () => {
     }
   });
 
-  test.skipIf(process.platform !== "win32" || !python)("the real runner does not run commands from file names", () => {
+  test("passes fixed extra args after the runner", () => {
+    expect(runnerCommand("C:\\tools\\face-swap-runner.bat", ["--help"]).cmd).toEqual([
+      "cmd",
+      "/c",
+      ".\\face-swap-runner.bat",
+      "--help",
+    ]);
+  });
+
+  // The clone can live in a directory like "C:\dev\R&D", so run the runner from
+  // a copy of the clone whose directory name is hostile too.
+  test.skipIf(process.platform !== "win32" || !python)("the real runner does not run commands from file names or the clone path", () => {
     const { root, paths } = fixture();
     try {
-      const { cmd, env } = swapCommand(resolve("face-swap-runner.bat"), paths);
-      const run = Bun.spawnSync(cmd, { env: { ...process.env, ...env } });
+      const clone = join(root, `clone${hostile}`);
+      mkdirSync(clone);
+      for (const file of ["face-swap-runner.bat", "face-swap.py"]) copyFileSync(resolve(file), join(clone, file));
+      const { cmd, cwd, env } = swapCommand(join(clone, "face-swap-runner.bat"), paths);
+      const run = Bun.spawnSync(cmd, { cwd, env: { ...process.env, ...env } });
       expect(run.stdout.toString()).not.toContain("INJECTED");
       expect(run.stderr.toString()).toContain(`Model not found at: ${paths.model}`);
       expect(run.exitCode).toBe(1);

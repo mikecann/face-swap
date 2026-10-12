@@ -9,7 +9,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { resolveToolDir } from "./tool-dir.js";
-import { swapCommand } from "./swap-command.js";
+import { runnerCommand, swapCommand } from "./swap-command.js";
 import { createEventsServer } from "./events.js";
 
 // ---------------------------------------------------------------------------
@@ -43,7 +43,9 @@ const modelPath = path.join(
 
 async function checkPython(): Promise<boolean> {
   try {
-    const p = Bun.spawn(["cmd", "/c", runnerBat, "--help"], {
+    const { cmd, cwd } = runnerCommand(runnerBat, ["--help"]);
+    const p = Bun.spawn(cmd, {
+      cwd,
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -207,7 +209,7 @@ async function runSwap(params: SwapParams) {
 
     // Invoke via the batch runner for Windows Python alias resolution. The
     // paths travel in the environment, never on cmd.exe's command line.
-    const { cmd, env } = swapCommand(runnerBat, {
+    const { cmd, cwd, env } = swapCommand(runnerBat, {
       target: targetFile,
       source: sourceFile,
       output: outputFile,
@@ -216,6 +218,7 @@ async function runSwap(params: SwapParams) {
     log(`[${jobId}] spawn: ${cmd.join(" ")} target=${targetFile} source=${sourceFile} output=${outputFile}`);
 
     const proc = Bun.spawn(cmd, {
+      cwd,
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env, ...env },

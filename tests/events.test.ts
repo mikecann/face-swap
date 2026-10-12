@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { randomUUID } from "crypto";
+import { connect } from "net";
 import { networkInterfaces } from "os";
 import { createEventsServer } from "../src/bun/events.js";
 
@@ -25,6 +26,21 @@ async function waitFor(check: () => boolean, ms: number) {
   const end = Date.now() + ms;
   while (!check() && Date.now() < end) await Bun.sleep(20);
   return check();
+}
+
+// The id EventSource would send back as Last-Event-ID: the last one it saw.
+function lastEventId(text: string) {
+  return [...text.matchAll(/^id: (\d+)$/gm)].at(-1)?.[1];
+}
+
+// A raw TCP connect, so an HTTP_PROXY can't answer on the server's behalf.
+function canConnect(host: string, port: number) {
+  return new Promise<boolean>((done) => {
+    const socket = connect({ host, port, timeout: 2_000 });
+    socket.once("connect", () => { socket.destroy(); done(true); });
+    socket.once("timeout", () => { socket.destroy(); done(false); });
+    socket.once("error", () => done(false));
+  });
 }
 
 describe("events server", () => {
@@ -57,12 +73,7 @@ describe("events server", () => {
     const lan = Object.values(networkInterfaces())
       .flat()
       .find((i) => i?.family === "IPv4" && !i.internal)?.address;
-    if (lan) {
-      const reached = await fetch(`http://${lan}:${events.server.port}/images/x.png`, {
-        signal: AbortSignal.timeout(2_000),
-      }).then(() => true, () => false);
-      expect(reached).toBe(false);
-    }
+    if (lan) expect(await canConnect(lan, events.server.port!)).toBe(false);
   });
 
   it("rejects requests without this session's token", async () => {
@@ -112,8 +123,8 @@ describe("events server", () => {
     const first = readStream(await fetch(url));
     events.broadcast({ kind: "swapping", jobId: "job-1" });
     expect(await waitFor(() => first.state.text.includes("job-1"), 2_000)).toBe(true);
-    const lastId = first.state.text.match(/^id: (\d+)$/m)?.[1];
-    expect(lastId).toBeDefined();
+    const lastId = lastEventId(first.state.text);
+    expect(lastId).toBe("1");
     first.cancel();
 
     events.broadcast({ kind: "swapResult", jobId: "job-2" });
@@ -122,5 +133,30 @@ describe("events server", () => {
     cancel = second.cancel;
     expect(await waitFor(() => second.state.text.includes("job-2"), 2_000)).toBe(true);
     expect(second.state.text).not.toContain("job-1");
+  });
+
+  // Without an id before the first real event, a client that dropped early
+  // reconnected with no Last-Event-ID and missed everything sent meanwhile.
+  it("replays to a client that reconnects before it saw any event", async () => {
+    events = createEventsServer(() => new Response("Not found", { status: 404 }));
+    const url = events.urlFor("/events");
+    const first = readStream(await fetch(url));
+    expect(await waitFor(() => lastEventId(first.state.text) !== undefined, 2_000)).toBe(true);
+    const cursor = lastEventId(first.state.text)!;
+    expect(cursor).toBe("0");
+    first.cancel();
+
+    events.broadcast({ kind: "swapResult", jobId: "job-1" });
+
+    const second = readStream(await fetch(url, { headers: { "Last-Event-ID": cursor } }));
+    expect(await waitFor(() => second.state.text.includes("job-1"), 2_000)).toBe(true);
+    second.cancel();
+
+    // A brand new page has no Last-Event-ID and starts from now.
+    const fresh = readStream(await fetch(url));
+    cancel = fresh.cancel;
+    expect(await waitFor(() => lastEventId(fresh.state.text) === "1", 2_000)).toBe(true);
+    await Bun.sleep(100);
+    expect(fresh.state.text).not.toContain("job-1");
   });
 });
